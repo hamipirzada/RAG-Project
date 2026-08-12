@@ -2,8 +2,6 @@
 
 A ground-up implementation of a hybrid retrieval-augmented generation (RAG) pipeline — built without frameworks to demonstrate genuine understanding of every component, from chunking strategy through evaluation.
 
-Built as Project 1 of the [GenAI Engineer Interview Mastery Program](https://github.com/hamipirzada).
-
 ---
 
 ## What This Is
