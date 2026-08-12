@@ -1,0 +1,8 @@
+sentence-transformers
+faiss-cpu
+rank-bm25
+transformers
+groq
+PyPDF2
+numpy
+pydantic

@@ -1,0 +1,62 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment variables — NEVER commit API keys
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files — PDFs and raw documents are large; store separately or use Git LFS
+data/*.pdf
+data/*.txt
+data/*.docx
+data/*.csv
+
+# FAISS index files (binary, large, regenerable from source documents)
+*.index
+*.faiss
+
+# Model cache (sentence-transformers and cross-encoder download here)
+# These are large and regenerable — don't commit
+.cache/
+models/
+~/.cache/huggingface/
+
+# Evaluation outputs
+eval_results/
+*.json
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
