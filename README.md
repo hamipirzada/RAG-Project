@@ -1,256 +1,131 @@
-# Production-Grade RAG System
+# RAG Project
 
-A ground-up implementation of a hybrid retrieval-augmented generation (RAG) pipeline — built without frameworks to demonstrate genuine understanding of every component, from chunking strategy through evaluation.
+A hybrid retrieval-augmented generation pipeline built from scratch — no LangChain, no LlamaIndex. Every component is implemented directly so I actually understand what's happening under the hood.
 
----
-
-## What This Is
-
-Most RAG tutorials wrap LangChain around an OpenAI API call. This project implements every layer from scratch:
-
-- **Recursive chunker** with configurable size and overlap
-- **Dual-index retrieval**: dense (FAISS + sentence-transformers) and sparse (BM25) running in parallel
-- **Reciprocal Rank Fusion** to merge ranked lists without score-scale incompatibility
-- **Cross-encoder re-ranking** for precise relevance scoring on the fused candidate set
-- **Confidence thresholding** — the system abstains rather than generating from low-relevance context
-- **Grounded generation** with numbered citations and explicit refuse-if-unsure instruction
-- **RAGAS-style evaluation** — faithfulness and context recall scored by LLM-as-judge against a golden dataset
+Tested on a 272-page technical handbook (GenAI Engineer's Handbook) and a 19-page study roadmap — 716 chunks total.
 
 ---
 
-## Architecture
+## Why I built this
+
+Most RAG tutorials are essentially: call an embedding API, store in a vector DB, retrieve, prompt GPT. That works, but you don't learn anything about why retrieval fails or how to fix it.
+
+I wanted to understand the actual failure modes — why dense retrieval misses exact keyword matches, why BM25 can't handle synonyms, why a high cosine similarity score doesn't mean the chunk actually answers the question. So I built each layer manually, including a simple evaluation loop to measure what's actually happening.
+
+---
+
+## What's in here
 
 ```
-INGESTION (offline)
-  Raw documents (PDF, TXT)
-      → Recursive chunker (paragraph → sentence → word fallback)
-      → Bi-encoder embedding  (all-MiniLM-L6-v2, 384-dim)
-      → FAISS dense index     (IndexFlatIP, exact cosine)
-      → BM25 sparse index     (BM25Okapi)
-
-RETRIEVAL (per query)
-  User query
-      → Dense retrieval       top-20 by cosine similarity
-      → Sparse retrieval      top-20 by BM25 score
-      → RRF fusion            rank-based merge, k=60
-      → Cross-encoder rerank  top-5 by joint (query, chunk) scoring
-      → Confidence threshold  abstain if no chunk passes minimum score
-
-GENERATION
-  Filtered context + query
-      → Grounded prompt       cite-or-refuse instruction
-      → LLM generation        temperature=0.1 for factual grounding
-      → Structured response   answer + source citations
-
-EVALUATION
-  Golden dataset (query, ground truth, relevant doc IDs)
-      → Faithfulness          LLM-as-judge: fraction of claims grounded in context
-      → Context Recall        set overlap: fraction of relevant docs retrieved
+rag/
+├── ingestion.py      PDF/text loading, recursive chunking with overlap
+├── indexing.py       FAISS dense index (sentence-transformers embeddings)
+├── bm25_index.py     BM25 sparse index
+├── retrieval.py      Hybrid retrieval + Reciprocal Rank Fusion
+├── reranker.py       Cross-encoder re-ranking
+├── context.py        Confidence thresholding, context assembly
+├── generation.py     Grounded generation with citations
+├── evaluation.py     Faithfulness + context recall scoring
+└── pipeline.py       Assembled end-to-end pipeline
 ```
 
 ---
 
-## Design Decisions
+## How it works
 
-### Why hybrid retrieval?
+**Ingestion:** documents are split with a recursive chunker (paragraph → sentence → word fallback), embedded with `all-MiniLM-L6-v2`, and stored in two indexes simultaneously — FAISS for dense retrieval and BM25 for keyword retrieval.
 
-Dense and sparse retrieval fail in complementary ways. BM25 misses semantic matches ("heart attack" vs "myocardial infarction"). Dense retrieval misses exact rare-term matches (product codes, legal citations). Running both and fusing with RRF captures what either alone would miss.
+**Retrieval:** both indexes run independently for each query. Dense retrieval handles semantic matches ("myocardial infarction" finding documents about "heart attack"). BM25 handles exact terms that dense retrieval misses (rare names, product codes, technical jargon). The two ranked lists are merged using Reciprocal Rank Fusion — rank-based, so there's no score-incompatibility problem between cosine similarities and BM25 scores.
 
-### Why RRF instead of score averaging?
+**Re-ranking:** the top 20 fused candidates go through a cross-encoder (`ms-marco-MiniLM-L-6-v2`), which scores each (query, chunk) pair jointly. This is more accurate than cosine similarity because the query and document attend to each other's tokens directly. Too slow to run on the whole index — that's why the first stage narrows it to 20 first.
 
-Dense similarity scores (cosine, bounded [-1, 1]) and BM25 scores (unbounded positive floats) live on incompatible scales. Averaging them is meaningless. RRF works purely on rank position, making it scale-agnostic. Documents retrieved by both systems receive contributions from both — rewarding cross-system consistency.
+**Generation:** chunks that don't pass a relevance threshold are dropped. The model is instructed to cite passage numbers and refuse if the answer isn't in the context. Temperature is set to 0.1 — low enough to stay grounded, not 0 because that causes repetition issues.
 
-### Why a cross-encoder for re-ranking?
-
-Bi-encoders embed query and document independently — they can't capture token-level interactions between them. A cross-encoder processes the full (query, document) pair jointly, letting attention heads match specific query terms to specific document phrases. This is more accurate but too slow for first-pass retrieval over millions of documents. The two-stage pattern (bi-encoder for breadth, cross-encoder for precision) gets near-cross-encoder quality at bi-encoder speed.
-
-### Why confidence thresholding?
-
-A RAG system that generates from low-relevance context is worse than one that admits ignorance — it produces confident-sounding hallucinations. If the best-matched chunk scores below the threshold, the system returns a structured refusal rather than a fabricated answer.
-
-### Why temperature=0.1 for generation?
-
-Low temperature keeps the model close to its highest-probability completions, which for a well-prompted grounded generation task means staying closer to the retrieved context rather than drifting toward parametric memory. Not 0.0 — a small amount of stochasticity prevents pathological repetition.
+**Evaluation:** a small golden dataset (query + expected answer + which document should be retrieved) runs through the full pipeline. Faithfulness is scored by an LLM judge that checks whether each claim in the answer is actually supported by the retrieved context. Context recall is a simple set-overlap check — did we retrieve the right document?
 
 ---
 
-## Project Structure
+## Actual output
 
 ```
-project1_rag/
-├── rag/
-│   ├── __init__.py
-│   ├── ingestion.py      Document loading and recursive chunking
-│   ├── indexing.py       Dense FAISS index (bi-encoder embeddings)
-│   ├── bm25_index.py     Sparse BM25 index
-│   ├── retrieval.py      Hybrid retrieval with Reciprocal Rank Fusion
-│   ├── reranker.py       Cross-encoder re-ranking
-│   ├── context.py        Confidence thresholding and context assembly
-│   ├── generation.py     Grounded generation with citations
-│   ├── evaluation.py     RAGAS-style faithfulness and recall evaluation
-│   └── pipeline.py       End-to-end assembled pipeline
-├── data/                 Documents go here (PDF, TXT)
-├── main.py               Usage example and golden dataset evaluation
-├── requirements.txt
-└── README.md
+Loading: data/GenAI_Engineers_Handbook.pdf
+  → 697 chunks from data/GenAI_Engineers_Handbook.pdf
+Loading: data/GenAI_Interview_Roadmap_Hamid.pdf
+  → 19 chunks from data/GenAI_Interview_Roadmap_Hamid.pdf
+
+Total chunks: 716
+Building dense index...
+Building sparse index...
+Ingestion complete.
+
+Query: What is the Chinchilla rule of thumb for training tokens per parameter?
+Hybrid retrieval returned 20 candidates
+Re-ranked to top 5 candidates
+
+Answer: The Chinchilla rule of thumb is Doptimal ≈ 20 × N, where Doptimal is the
+optimal number of training tokens and N is the number of model parameters.
+This means that to train a model of N parameters compute-optimally, feed it
+roughly 20N tokens. [2]
+Sources: ['GenAI_Engineers_Handbook.pdf']
+Pipeline: 20 retrieved → 5 reranked → 1 used
+
+EVALUATION RESULTS (3 samples)
+Average Faithfulness:    0.267
+Average Context Recall:  1.000
 ```
+
+Context recall is 1.0 — it's finding the right documents every time. Faithfulness is 0.267 — lower than I'd like.
+
+The faithfulness issue is a chunking problem, not a generation problem. The Chinchilla content sits inside a 500-token chunk that's mostly about temperature defaults — the chunk's embedding reflects the dominant topic (temperature), so the cross-encoder ranks it low for Chinchilla queries. Only 1 chunk passes the relevance threshold, giving the model limited context to cite, so it supplements with parametric memory. Smaller chunks (200-300 tokens) or semantic chunking would isolate topics and fix this.
+
+I'm leaving the current scores in rather than tuning them away — the gap between recall (1.0) and faithfulness (0.267) is itself informative. It shows the retrieval is finding the right documents but the chunking strategy is making it hard for the re-ranker to surface the relevant passage cleanly.
 
 ---
 
-## Installation
+## Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/hamipirzada/project1-rag
-cd project1-rag
+git clone https://github.com/hamipirzada/RAG-Project.git
+cd RAG-Project
 
-# Create and activate virtual environment
 python3 -m venv venv
 source venv/bin/activate
 
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-**requirements.txt:**
-```
-sentence-transformers==2.7.0
-faiss-cpu==1.8.0
-rank-bm25==0.2.2
-transformers==4.41.0
-groq==0.9.0
-PyPDF2==3.0.1
-numpy==1.26.4
-pydantic==2.7.0
-torch
-```
-
----
-
-## Usage
-
-### Set API Key
+Get a free Groq API key at [console.groq.com](https://console.groq.com) — the free tier is enough for testing.
 
 ```bash
-export GROQ_API_KEY="your-groq-api-key"
-# Get a free key at: https://console.groq.com
+export GROQ_API_KEY="your-key-here"
 ```
 
-### Add Documents
+Add your own documents to `data/` (PDF or TXT), update the file paths in `main.py`, and run:
 
 ```bash
-mkdir -p data
-cp your_documents.pdf data/
-```
-
-### Run
-
-```python
-from rag.pipeline import RAGPipeline
-
-pipeline = RAGPipeline(
-    groq_api_key="your-key",
-    chunk_size=500,
-    chunk_overlap=50,
-    retrieval_top_k=20,
-    reranker_top_k=5,
-)
-
-pipeline.ingest(["data/your_document.pdf"])
-
-result = pipeline.query(
-    "Your question here?",
-    verbose=True,
-)
-
-print(result["answer"])
-print("Sources:", result["sources"])
-```
-
-### Run Evaluation
-
-```python
-from rag.evaluation import EvalSample, run_evaluation
-from groq import Groq
-
-golden_dataset = [
-    EvalSample(
-        query="What is the Chinchilla rule of thumb?",
-        ground_truth_answer="Approximately 20 training tokens per model parameter.",
-        relevant_doc_ids=["GenAI_Engineers_Handbook.pdf"],
-    ),
-    # Add more samples...
-]
-
-client = Groq(api_key="your-key")
-results = run_evaluation(pipeline, golden_dataset, client)
+python main.py
 ```
 
 ---
 
-## Evaluation Results
+## What I'd change with more time
 
-Evaluated over 3 golden samples from the GenAI Engineer's Handbook (272 pages).
-
-| Metric | Score | Notes |
-|---|---|---|
-| Context Recall | **1.000** | All queries retrieved from the correct source document |
-| Faithfulness | 0.517 | Claims grounded in retrieved context — limited by mixed-topic chunks |
-
-**Known limitation:** the current 500-token chunker produces chunks that mix topics (e.g., a chunk about temperature defaults that also contains Chinchilla scaling content mid-way through). This causes the cross-encoder to rank these chunks low for Chinchilla queries, and the LLM supplements retrieved context with parametric memory — reducing faithfulness. Smaller chunks (200-300 tokens) or semantic chunking would isolate topics and improve this metric.
+- Semantic chunking based on embedding similarity between adjacent sentences — would eliminate the mixed-topic chunk problem that's hurting faithfulness
+- Contextual retrieval: prepend a short LLM-generated summary to each chunk before embedding, so chunks like "this shall apply as described in Section 4.2" have enough context to be retrievable
+- Langfuse tracing on every query — right now the pipeline logs to stdout, which isn't useful in production
+- A/B evaluation comparing different chunking strategies against the same golden dataset rather than tuning by intuition
 
 ---
 
-## Retrieval Pipeline in Detail
+## Stack
 
-### Reciprocal Rank Fusion (RRF)
-
-For a document ranked at position `r` in retrieval system `i`:
-
-```
-RRF_score(d) = Σ_i  1 / (k + rank_i(d))
-```
-
-With `k=60` (empirically validated smoothing constant), a document ranked #2 in dense and #4 in BM25 scores:
-
-```
-1/(60+2) + 1/(60+4) = 0.01613 + 0.01563 = 0.03175
-```
-
-Higher than a document ranked #1 in dense only:
-```
-1/(60+1) = 0.01639
-```
-
-Documents retrieved by both systems consistently outrank those retrieved by one — RRF rewards cross-system agreement.
-
-### Cross-Encoder Re-ranking
-
-The cross-encoder (`ms-marco-MiniLM-L-6-v2`) processes each (query, chunk) pair jointly:
-
-```
-Input:  [CLS] query tokens [SEP] document tokens [SEP]
-Output: scalar relevance score
-```
-
-Unlike bi-encoders (which embed query and document independently), the cross-encoder allows every query token to attend to every document token — capturing whether the document contains the specific answer, not just whether it's about the same topic.
+- `sentence-transformers` — bi-encoder embeddings
+- `faiss-cpu` — dense vector index
+- `rank-bm25` — sparse BM25 index
+- `transformers` — cross-encoder re-ranking
+- `groq` — LLM generation and evaluation (free tier)
+- `PyPDF2` — PDF text extraction
 
 ---
 
-## Interview Talking Points
-
-**"Walk me through your RAG project."**
-
-Four design decisions drove this system:
-
-1. **Hybrid retrieval with RRF** — dense and sparse retrieval fail in complementary ways; combining them via rank-based fusion improves recall over either alone without score-incompatibility issues.
-
-2. **Two-stage retrieval** — retrieve top-20 cheaply with bi-encoder + FAISS (O(log n)), then re-rank top-20 precisely with cross-encoder (O(20) forward passes). Near-cross-encoder quality at bi-encoder speed for the first stage.
-
-3. **Confidence thresholding** — if no retrieved chunk passes the relevance threshold, the system abstains with a structured refusal rather than generating from poor context. Prevents hallucination from low-quality retrieval.
-
-4. **Evaluation-driven development** — faithfulness (are claims grounded in context?) and context recall (did we retrieve the right documents?) run against a golden dataset. Any change to prompts, chunking, or models requires metrics to hold or improve before deployment.
-
----
-
-## Candidate
+Hamid Mujtaba · [LinkedIn](https://linkedin.com/in/hamid-mujtaba) · [hamipirzada@gmail.com](mailto:hamipirzada@gmail.com)
